@@ -5,7 +5,7 @@ library(randomForest)
 library(here) # 建議加入 here 套件
 
 # 使用 here 建立穩健的路徑
-model_path <- here::here("models", "iris_rf_model.rds")
+model_path <- here::here("./models", "iris_rf_model.rds")
 if (!file.exists(model_path)) {
   stop("Model file not found at: ", model_path)
 }
