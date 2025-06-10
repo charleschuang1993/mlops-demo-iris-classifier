@@ -7,3 +7,6 @@ pr <- plumber::plumb('/Users/charleschuang/Desktop/atgenomix/ToolDev/mlops-demo-
 # Error reporting has been turned off by default. See `pr_set_debug()` for more details.
 # To disable this message, set a debug value.
 # This message is displayed once per session.
+
+# Swagger UI:
+# http://127.0.0.1:8000/__docs__/
