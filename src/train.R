@@ -28,3 +28,4 @@ mlflow_log_artifact("./mlops-demo-iris-classifier/models/iris_rf_model.rds")
 
 # end the MLflow run
 mlflow_end_run()
+
