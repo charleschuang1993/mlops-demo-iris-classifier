@@ -62,6 +62,7 @@ def register_model(req: RegisterRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# uvicorn src.fastapi_main:app --host 0.0.0.0 --port 8080 --reload
 #curl -X POST http://localhost:8080/predict   -H "Content-Type: application/json"   -d '{"Sepal_Length": 5.1, "Sepal_Width": 3.5, "Petal_Length": 1.4, "Petal_Width": 0.2}'
 #swagger: http://localhost:8080/docs
 
