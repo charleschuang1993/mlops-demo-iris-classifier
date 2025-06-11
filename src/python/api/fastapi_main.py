@@ -1,31 +1,34 @@
 # src/python/api/fastapi_main.py
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Path
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Path as ApiPath
 from pydantic import BaseModel
 import requests
 import mlflow
 from mlflow import MlflowClient
-from pathlib import Path
+from pathlib import Path as P
 import uuid
 import joblib
+import numpy as np
 
-# 导入 Python pipeline 函数
-from src.python.preprocessing.preprocess import load_and_preprocess
-from src.python.modeling.run_experiment import train as py_train
+# -------------------------------------------------------------
+# Import pipeline functions (已無 fire / load_model)
+# -------------------------------------------------------------
+from src.python.modeling.train import train as py_train
 from src.python.modeling.evaluate import evaluate as py_evaluate
-from src.python.modeling.predict import load_model as py_load_model, predict as py_predict
+from src.python.modeling.predict import predict as py_predict
 
 app = FastAPI(title="Iris MLOps API")
 
-# ── Shared schemas ──────────────────────────────────────────────
+# ── Schemas ───────────────────────────────────────────────────
 class IrisInput(BaseModel):
     Sepal_Length: float
     Sepal_Width: float
     Petal_Length: float
     Petal_Width: float
 
-class TrainParams(BaseModel):
-    n_estimators: int = 100
-    max_depth: int = 5
+class TrainRequest(BaseModel):
+    data: str = "data/iris.csv"              # 可改成其他 CSV
+    experiment_name: str = "iris-classification"
+    output_dir: str = "models/python"
 
 class RegisterRequest(BaseModel):
     run_id: str
@@ -41,22 +44,22 @@ class DeleteRequest(BaseModel):
     model_name: str
     version: int
 
-# ── Initialization ──────────────────────────────────────────────
-# MLflow Tracking URI & Client
+# ── Initialization ────────────────────────────────────────────
 mlflow.set_tracking_uri("http://localhost:5001")
 mlflow_client = MlflowClient()
 
-# Paths
-DATA_PATH = Path(__file__).parents[2] / "data" / "iris.csv"
-PY_MODEL_DIR = Path(__file__).parents[2] / "models" / "python"
+BASE_DIR = P(__file__).resolve().parents[2]
+DATA_PATH = BASE_DIR / "data" / "iris.csv"
+PY_MODEL_DIR = BASE_DIR / "models" / "python"
+PY_MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
-# ── Health Check ────────────────────────────────────────────────
+# ── Health Check ──────────────────────────────────────────────
 @app.get("/health")
 def health():
-    return {"status": "ok", "from": "FastAPI"}
+    return {"status": "ok", "service": "FastAPI Iris MLOps"}
 
-# ── R-Plumber 转发（原 /predict 接口）──────────────────────────
-@app.post("/r/predict", summary="Forward to R-Plumber prediction")
+# ── R‑Plumber 轉發（若仍需要）────────────────────────────────
+@app.post("/r/predict", summary="Forward to R‑Plumber prediction")
 def predict_r(input: IrisInput):
     payload = {
         "Sepal.Length": input.Sepal_Length,
@@ -71,36 +74,49 @@ def predict_r(input: IrisInput):
     except requests.exceptions.RequestException as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# ── Python Pipeline Endpoints ──────────────────────────────────
+# ── Python Pipeline Endpoints ─────────────────────────────────
 @app.post("/py/train", summary="Train Python model in background")
-def train_py(params: TrainParams, background_tasks: BackgroundTasks):
+def train_py(req: TrainRequest, background_tasks: BackgroundTasks):
+    """啟動背景訓練，將最終模型存到 req.output_dir/best_model.pkl"""
     task_id = str(uuid.uuid4())
-    model_path = PY_MODEL_DIR / f"{task_id}.pkl"
+    out_dir = BASE_DIR / req.output_dir
+    out_dir.mkdir(parents=True, exist_ok=True)
+
     background_tasks.add_task(
         py_train,
-        data_path=str(DATA_PATH),
-        model_output_path=str(model_path),
-        n_estimators=params.n_estimators,
-        max_depth=params.max_depth
+        data=req.data,
+        experiment_name=req.experiment_name,
+        output_dir=str(out_dir)
     )
+    model_path = out_dir / "best_model.pkl"
     return {"task_id": task_id, "model_path": str(model_path)}
 
 @app.get("/py/evaluate/{model_filename}", summary="Evaluate Python model")
-def eval_py(model_filename: str = Path(..., description="Filename of the .pkl model")):
+def eval_py(model_filename: str = ApiPath(..., description=".pkl model filename")):
     model_path = PY_MODEL_DIR / model_filename
     if not model_path.exists():
-        raise HTTPException(status_code=404, detail="Model not found")
-    metrics = py_evaluate(str(model_path), str(DATA_PATH))
+        raise HTTPException(status_code=404, detail="Model not found. Train first.")
+    metrics = py_evaluate(
+        model_path=str(model_path),
+        data_path=str(DATA_PATH),
+        output_dir=str(PY_MODEL_DIR)
+    )
     return {"source": "Python", "metrics": metrics}
 
-@app.post("/py/predict/{model_filename}", summary="Predict with Python model")
+@app.post("/py/predict/{model_filename}", summary="Predict with Python model (single sample)")
 def predict_py(model_filename: str, input: IrisInput):
-    model = py_load_model(model_filename)
-    preds = py_predict(model, input.dict())
+    model_path = PY_MODEL_DIR / model_filename
+    if not model_path.exists():
+        raise HTTPException(status_code=404, detail="Model not found. Train first.")
+
+    # 直接 joblib 載入模型，對單筆樣本做推論
+    model = joblib.load(model_path)
+    sample = np.array([[input.Sepal_Length, input.Sepal_Width, input.Petal_Length, input.Petal_Width]])
+    preds = model.predict(sample).tolist()
     return {"source": "Python", "predictions": preds}
 
-# ── MLflow Model Registry APIs ─────────────────────────────────
-@app.post("/register", summary="Register R model to MLflow")
+# ── MLflow Model Registry APIs ────────────────────────────────
+@app.post("/register", summary="Register model to MLflow")
 def register_model(req: RegisterRequest):
     try:
         uri = f"runs:/{req.run_id}/{req.artifact_path}"
@@ -126,19 +142,21 @@ def promote_model(req: PromoteRequest):
 def list_models():
     try:
         regs = mlflow_client.search_registered_models()
-        output = []
-        for m in regs:
-            versions = [
-                {
-                    "version": v.version,
-                    "stage": v.current_stage,
-                    "status": v.status,
-                    "creation_timestamp": v.creation_timestamp
-                }
-                for v in m.latest_versions
-            ]
-            output.append({"name": m.name, "versions": versions})
-        return output
+        return [
+            {
+                "name": m.name,
+                "versions": [
+                    {
+                        "version": v.version,
+                        "stage": v.current_stage,
+                        "status": v.status,
+                        "creation_timestamp": v.creation_timestamp,
+                    }
+                    for v in m.latest_versions
+                ],
+            }
+            for m in regs
+        ]
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -151,47 +169,11 @@ def delete_model_version(req: DeleteRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/models/{model_name}", summary="Delete entire registered model")
-def delete_registered_model(model_name: str = Path(..., description="Model to delete")):
+def delete_registered_model(model_name: str = ApiPath(..., description="Model to delete")):
     try:
         mlflow_client.delete_registered_model(name=model_name)
         return {"status": "success", "message": f"Deleted model '{model_name}'"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-
-
-
-# uvicorn src.fastapi_main:app --host 0.0.0.0 --port 8080 --reload
-#curl -X POST http://localhost:8080/predict   -H "Content-Type: application/json"   -d '{"Sepal_Length": 5.1, "Sepal_Width": 3.5, "Petal_Length": 1.4, "Petal_Width": 0.2}'
-#swagger: http://localhost:8080/docs
-
-# curl -X POST http://localhost:8080/register \
-#   -H "Content-Type: application/json" \
-#   -d '{
-#         "run_id": "797558b609404e0ea672fb8ecc2b5965",
-#         "model_name": "testRModel_iris_example"
-#       }'
-
-
-# promote model
-# curl -X POST http://localhost:8080/promote \
-#   -H "Content-Type: application/json" \
-#   -d '{"model_name": "testRModel_iris_example", "version": 1, "stage": "Production"}'
-
-# list models
-# curl -X GET http://localhost:8080/models
-
-# delete model version
-# curl -X DELETE http://localhost:8080/delete \
-#   -H "Content-Type: application/json" \
-#   -d '{"model_name": "testRModel_iris_example", "version": 1}'
-
-
-
-
-# mlflow server \
-#   --backend-store-uri sqlite:///$(pwd)/mlflow.db \
-#   --default-artifact-root $(pwd)/mlruns \
-#   --serve-artifacts \
-#   --host 0.0.0.0 \
-#   --port 5001
+# ===== Duplicate import/path conflicts resolved; pathlib.Path renamed to P =====
