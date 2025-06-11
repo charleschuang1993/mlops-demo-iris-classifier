@@ -1,18 +1,31 @@
-from fastapi import FastAPI, HTTPException
+# src/python/api/fastapi_main.py
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Path
 from pydantic import BaseModel
 import requests
 import mlflow
 from mlflow import MlflowClient
+from pathlib import Path
+import uuid
+import joblib
 
-app = FastAPI()
+# 导入 Python pipeline 函数
+from src.python.preprocessing.preprocess import load_and_preprocess
+from src.python.modeling.run_experiment import train as py_train
+from src.python.modeling.evaluate import evaluate as py_evaluate
+from src.python.modeling.predict import load_model as py_load_model, predict as py_predict
 
-# ====================== Input Schemas =========================
+app = FastAPI(title="Iris MLOps API")
 
+# ── Shared schemas ──────────────────────────────────────────────
 class IrisInput(BaseModel):
     Sepal_Length: float
     Sepal_Width: float
     Petal_Length: float
     Petal_Width: float
+
+class TrainParams(BaseModel):
+    n_estimators: int = 100
+    max_depth: int = 5
 
 class RegisterRequest(BaseModel):
     run_id: str
@@ -28,72 +41,93 @@ class DeleteRequest(BaseModel):
     model_name: str
     version: int
 
-# ======================= Initialization ==========================
-
-# Set MLflow tracking path (can be file:// or http:// depending on usage)
-#mlflow.set_tracking_uri("file:///Users/charleschuang/Desktop/atgenomix/ToolDev/mlops-demo-iris-classifier/mlruns")
+# ── Initialization ──────────────────────────────────────────────
+# MLflow Tracking URI & Client
 mlflow.set_tracking_uri("http://localhost:5001")
-client = MlflowClient()
+mlflow_client = MlflowClient()
 
-# ======================= Core APIs ==========================
+# Paths
+DATA_PATH = Path(__file__).parents[2] / "data" / "iris.csv"
+PY_MODEL_DIR = Path(__file__).parents[2] / "models" / "python"
 
+# ── Health Check ────────────────────────────────────────────────
 @app.get("/health")
 def health():
     return {"status": "ok", "from": "FastAPI"}
 
-@app.post("/predict")
-def predict(input: IrisInput):
-    # Convert to R API compatible format (column names)
-    r_payload = {
+# ── R-Plumber 转发（原 /predict 接口）──────────────────────────
+@app.post("/r/predict", summary="Forward to R-Plumber prediction")
+def predict_r(input: IrisInput):
+    payload = {
         "Sepal.Length": input.Sepal_Length,
-        "Sepal.Width": input.Sepal_Width,
+        "Sepal.Width":  input.Sepal_Width,
         "Petal.Length": input.Petal_Length,
-        "Petal.Width": input.Petal_Width,
+        "Petal.Width":  input.Petal_Width,
     }
     try:
-        r_response = requests.post("http://localhost:8000/predict", json=r_payload)
-        r_response.raise_for_status()
-        return {"source": "R plumber", **r_response.json()}
+        resp = requests.post("http://localhost:8000/predict", json=payload)
+        resp.raise_for_status()
+        return {"source": "R-plumber", **resp.json()}
     except requests.exceptions.RequestException as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# ===================== MLflow Model Registry APIs ======================
+# ── Python Pipeline Endpoints ──────────────────────────────────
+@app.post("/py/train", summary="Train Python model in background")
+def train_py(params: TrainParams, background_tasks: BackgroundTasks):
+    task_id = str(uuid.uuid4())
+    model_path = PY_MODEL_DIR / f"{task_id}.pkl"
+    background_tasks.add_task(
+        py_train,
+        data_path=str(DATA_PATH),
+        model_output_path=str(model_path),
+        n_estimators=params.n_estimators,
+        max_depth=params.max_depth
+    )
+    return {"task_id": task_id, "model_path": str(model_path)}
 
-@app.post("/register")
+@app.get("/py/evaluate/{model_filename}", summary="Evaluate Python model")
+def eval_py(model_filename: str = Path(..., description="Filename of the .pkl model")):
+    model_path = PY_MODEL_DIR / model_filename
+    if not model_path.exists():
+        raise HTTPException(status_code=404, detail="Model not found")
+    metrics = py_evaluate(str(model_path), str(DATA_PATH))
+    return {"source": "Python", "metrics": metrics}
+
+@app.post("/py/predict/{model_filename}", summary="Predict with Python model")
+def predict_py(model_filename: str, input: IrisInput):
+    model = py_load_model(model_filename)
+    preds = py_predict(model, input.dict())
+    return {"source": "Python", "predictions": preds}
+
+# ── MLflow Model Registry APIs ─────────────────────────────────
+@app.post("/register", summary="Register R model to MLflow")
 def register_model(req: RegisterRequest):
     try:
-        model_uri = f"runs:/{req.run_id}/{req.artifact_path}"
-        result = mlflow.register_model(
-            model_uri=model_uri,
-            name=req.model_name
-        )
-        return {
-            "status": "success",
-            "model_name": result.name,
-            "version": result.version
-        }
+        uri = f"runs:/{req.run_id}/{req.artifact_path}"
+        result = mlflow.register_model(model_uri=uri, name=req.model_name)
+        return {"status": "success", "model_name": result.name, "version": result.version}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/promote")
+@app.post("/promote", summary="Promote model version stage")
 def promote_model(req: PromoteRequest):
     try:
-        client.transition_model_version_stage(
+        mlflow_client.transition_model_version_stage(
             name=req.model_name,
             version=req.version,
             stage=req.stage,
             archive_existing_versions=False
         )
-        return {"status": "success", "message": f"Model promoted to {req.stage}"}
+        return {"status": "success", "message": f"Promoted to {req.stage}"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/models")
+@app.get("/models", summary="List registered models")
 def list_models():
     try:
-        models = client.search_registered_models()
-        result = []
-        for m in models:
+        regs = mlflow_client.search_registered_models()
+        output = []
+        for m in regs:
             versions = [
                 {
                     "version": v.version,
@@ -103,36 +137,27 @@ def list_models():
                 }
                 for v in m.latest_versions
             ]
-            result.append({"name": m.name, "versions": versions})
-        return result
+            output.append({"name": m.name, "versions": versions})
+        return output
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.delete("/delete")
+@app.delete("/delete", summary="Delete a single model version")
 def delete_model_version(req: DeleteRequest):
     try:
-        client.delete_model_version(
-            name=req.model_name,
-            version=req.version
-        )
-        return {"status": "success", "message": f"Version {req.version} deleted from {req.model_name}"}
+        mlflow_client.delete_model_version(name=req.model_name, version=req.version)
+        return {"status": "success", "message": f"Deleted version {req.version}"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    
-from fastapi import Path
 
 @app.delete("/models/{model_name}", summary="Delete entire registered model")
-def delete_registered_model(
-    model_name: str = Path(..., description="Name of the registered model to delete")
-):
-    """
-    Delete a registered model and all its versions from MLflow Model Registry.
-    """
+def delete_registered_model(model_name: str = Path(..., description="Model to delete")):
     try:
-        client.delete_registered_model(name=model_name)
-        return {"status": "success", "message": f"Registered model '{model_name}' deleted"}
+        mlflow_client.delete_registered_model(name=model_name)
+        return {"status": "success", "message": f"Deleted model '{model_name}'"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 
 
