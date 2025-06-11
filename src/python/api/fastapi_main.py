@@ -31,7 +31,8 @@ class DeleteRequest(BaseModel):
 # ======================= Initialization ==========================
 
 # Set MLflow tracking path (can be file:// or http:// depending on usage)
-mlflow.set_tracking_uri("file:///Users/charleschuang/Desktop/atgenomix/ToolDev/mlops-demo-iris-classifier/mlruns")
+#mlflow.set_tracking_uri("file:///Users/charleschuang/Desktop/atgenomix/ToolDev/mlops-demo-iris-classifier/mlruns")
+mlflow.set_tracking_uri("http://localhost:5001")
 client = MlflowClient()
 
 # ======================= Core APIs ==========================
@@ -90,7 +91,7 @@ def promote_model(req: PromoteRequest):
 @app.get("/models")
 def list_models():
     try:
-        models = client.list_registered_models()
+        models = client.search_registered_models()
         result = []
         for m in models:
             versions = [
@@ -117,6 +118,22 @@ def delete_model_version(req: DeleteRequest):
         return {"status": "success", "message": f"Version {req.version} deleted from {req.model_name}"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    
+from fastapi import Path
+
+@app.delete("/models/{model_name}", summary="Delete entire registered model")
+def delete_registered_model(
+    model_name: str = Path(..., description="Name of the registered model to delete")
+):
+    """
+    Delete a registered model and all its versions from MLflow Model Registry.
+    """
+    try:
+        client.delete_registered_model(name=model_name)
+        return {"status": "success", "message": f"Registered model '{model_name}' deleted"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 
 # uvicorn src.fastapi_main:app --host 0.0.0.0 --port 8080 --reload
@@ -143,3 +160,13 @@ def delete_model_version(req: DeleteRequest):
 # curl -X DELETE http://localhost:8080/delete \
 #   -H "Content-Type: application/json" \
 #   -d '{"model_name": "testRModel_iris_example", "version": 1}'
+
+
+
+
+# mlflow server \
+#   --backend-store-uri sqlite:///$(pwd)/mlflow.db \
+#   --default-artifact-root $(pwd)/mlruns \
+#   --serve-artifacts \
+#   --host 0.0.0.0 \
+#   --port 5001
