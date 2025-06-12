@@ -1,4 +1,6 @@
 mlflow.db
 src/.DS_Store
 .DS_Store
-__pycache__/
+__pycache__/*.pyc
+*.pyc
+src/python/modeling/__pycache__/train.cpython-313.pyc
