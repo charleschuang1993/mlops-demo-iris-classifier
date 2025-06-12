@@ -1,84 +1,95 @@
-"""Model evaluation utility.
+"""Model evaluation utility (built‑in Iris or custom CSV).
 
-Loads a model from MLflow Model Registry, evaluates it on either the built-in
-Iris dataset **or** a custom CSV (via `load_and_preprocess`), and stores the
-classification report & confusion matrix under `outputs/evaluate`.
+Fixes for runtime NameError:
+• include local ``_load_data`` helper
+• import ``mlflow_sklearn`` before use
+• robust fallback to latest model version
 """
 
-import json
 from pathlib import Path
+import json
+from typing import Tuple
 
 import matplotlib.pyplot as plt
-import mlflow.sklearn
 from sklearn.datasets import load_iris
 from sklearn.metrics import classification_report, confusion_matrix
+from mlflow import sklearn as mlflow_sklearn, MlflowClient
 
 from src.python.preprocessing.preprocess import load_and_preprocess
 
+client = MlflowClient()
 
-def _load_data(data_path: str):
-    """Return (X, y) for either the built-in Iris dataset or a CSV path."""
+# -----------------------------------------------------------------------------
+# Helper: load dataset (built‑in or CSV)
+# -----------------------------------------------------------------------------
 
-    if data_path == "iris":  # built-in dataset keyword
+def _load_data(path: str):
+    """Return X, y from *path*.
+
+    * ``"iris"`` → built‑in scikit‑learn dataset
+    * *relative CSV* → resolve relative to CWD; if not found, also try relative
+      to project root (three levels up from this file).
+    * *absolute CSV* → use as‑is.
+    """
+
+    # Built‑in dataset ---------------------------------------------------------
+    if path == "iris":
         iris = load_iris()
-        X, y = iris.data, iris.target
-    else:  # assume CSV path (relative or absolute)
-        X, y = load_and_preprocess(data_path)
-    return X, y
+        return iris.data, iris.target
 
+    csv_path = Path(path)
+
+    # Relative path not found?  Try under project root
+    if not csv_path.exists() and not csv_path.is_absolute():
+        project_root = Path(__file__).resolve().parents[3]
+        alt_path = project_root / csv_path
+        if alt_path.exists():
+            csv_path = alt_path
+
+    if not csv_path.exists():
+        raise FileNotFoundError(f"CSV not found: {path}")
+
+    # Use preprocessing utility to turn CSV → X, y
+    return load_and_preprocess(str(csv_path))
+
+# -----------------------------------------------------------------------------
+# Main evaluate function (used by FastAPI)
+# -----------------------------------------------------------------------------
 
 def evaluate(
     data_path: str,
     mlflow_model_name: str,
     mlflow_model_stage: str = "Production",
     output_dir: str = "outputs/evaluate",
-) -> dict:
-    """Evaluate an MLflow-registered model and save artifacts.
+):
+    """Evaluate a registered model on *data_path* and save artifacts.
 
-    Args:
-        data_path: Either the literal string ``"iris"`` (use scikit-learn's
-            built-in Iris dataset) **or** a CSV file path.
-        mlflow_model_name: Name of the registered model in MLflow Model
-            Registry.
-        mlflow_model_stage: Desired stage (e.g. ``"Production"``, ``"Staging"``)
-            or a specific version number.
-        output_dir: Directory to save evaluation artifacts.
-
-    Returns:
-        dict: Sklearn classification report (``output_dict=True``).
+    Returns the classification report as a dictionary.
     """
 
-    # ------------------------------------------------------------------
-    # 1. Load model from MLflow Model Registry
-    # ------------------------------------------------------------------
-    model_uri = f"models:/{mlflow_model_name}/{mlflow_model_stage}"
-    model = mlflow.sklearn.load_model(model_uri)
+    # 1) Load model with stage→latest fallback
+    try:
+        model_uri = f"models:/{mlflow_model_name}/{mlflow_model_stage}"
+        model = mlflow_sklearn.load_model(model_uri)
+    except Exception:
+        latest = client.get_latest_versions(mlflow_model_name)[0]
+        model = mlflow_sklearn.load_model(f"models:/{mlflow_model_name}/{latest.version}")
 
-    # ------------------------------------------------------------------
-    # 2. Load evaluation data
-    # ------------------------------------------------------------------
+    # 2) Load data
     X, y = _load_data(data_path)
 
-    # ------------------------------------------------------------------
-    # 3. Predict & compute metrics
-    # ------------------------------------------------------------------
+    # 3) Predict & metrics
     preds = model.predict(X)
-    report_dict = classification_report(y, preds, output_dict=True)
+    report = classification_report(y, preds, output_dict=True)
     cm = confusion_matrix(y, preds)
 
-    # ------------------------------------------------------------------
-    # 4. Persist artifacts
-    # ------------------------------------------------------------------
-    out_dir = Path(output_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    # 4) Persist artifacts
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
 
-    # 4a. Classification report (JSON)
-    report_path = out_dir / "classification_report.json"
-    with open(report_path, "w") as fp:
-        json.dump(report_dict, fp, indent=4)
-    print(f"Saved classification report → {report_path}")
+    with open(out / "classification_report.json", "w") as fp:
+        json.dump(report, fp, indent=4)
 
-    # 4b. Confusion matrix (PNG)
     fig, ax = plt.subplots(figsize=(6, 4))
     cax = ax.matshow(cm)
     fig.colorbar(cax)
@@ -91,8 +102,6 @@ def evaluate(
     ax.set_xlabel("Predicted")
     ax.set_title("Confusion Matrix")
     plt.tight_layout()
-    cm_path = out_dir / "confusion_matrix.png"
-    fig.savefig(cm_path)
-    print(f"Saved confusion matrix → {cm_path}")
+    fig.savefig(out / "confusion_matrix.png")
 
-    return report_dict
+    return report

@@ -1,87 +1,89 @@
 # src/python/api/fastapi_main.py
 
-"""FastAPI application for Iris classification MLOps demo.
+"""FastAPI application for the Iris‑classifier MLOps demo.
 
-All model management is handled **exclusively** by MLflow.  
-This API offers endpoints to train, check status, evaluate, predict, and manage
-registered models.
+• Supports **training**, **evaluation**, **prediction**, and **model registry** ops.  
+• Accepts either the built‑in *Iris* dataset (`data_path="iris"`) **or** any CSV
+  file path that contains the same columns as the Iris dataset.
+• All model artefacts are managed **exclusively** via MLflow (no local .pkl).
 """
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Path
-from pydantic import BaseModel, Field
-import mlflow
-from mlflow import sklearn as mlflow_sklearn, MlflowClient
-import uuid
+from __future__ import annotations
 
+from pathlib import Path as _Path
+from uuid import uuid4
+
+import mlflow
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Path
+from mlflow import MlflowClient, sklearn as mlflow_sklearn
+from pydantic import BaseModel, Field
+from sklearn.datasets import load_iris
+
+from src.python.preprocessing.preprocess import load_and_preprocess
 from src.python.modeling.train import train as py_train
 from src.python.modeling.evaluate import evaluate as py_evaluate
 
-# -----------------------------------------------------------------------------
-# Initialisation
-# -----------------------------------------------------------------------------
-app = FastAPI(
-    title="Iris MLOps API",
-    description="Endpoints for training, evaluating, predicting, and managing models via MLflow",
-    version="1.0.2",
-)
-
+# ──────────────────────────────────────────────────────────────────────────────
+# FastAPI + MLflow initialisation
+# ──────────────────────────────────────────────────────────────────────────────
 mlflow.set_tracking_uri("http://localhost:5001")
 client = MlflowClient()
 
-# -----------------------------------------------------------------------------
-# Schemas
-# -----------------------------------------------------------------------------
+app = FastAPI(
+    title="Iris MLOps API",
+    description=(
+        "Train / evaluate / predict with models stored in the MLflow Model\n"
+        "Registry. Supports the built‑in Iris dataset **and** custom CSVs."
+    ),
+    version="1.3.0",
+)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Pydantic schemas
+# ──────────────────────────────────────────────────────────────────────────────
 class IrisInput(BaseModel):
-    """Input features for single‑record prediction."""
-    sepal_length: float = Field(..., alias="sepal_length")
-    sepal_width: float = Field(..., alias="sepal_width")
-    petal_length: float = Field(..., alias="petal_length")
-    petal_width: float = Field(..., alias="petal_width")
+    sepal_length: float
+    sepal_width: float
+    petal_length: float
+    petal_width: float
 
 class TrainParams(BaseModel):
-    """Parameters accepted by the training endpoint.
-
-    Only the built‑in Iris dataset (string literal "iris") is supported at the
-    moment because `train.py` does not implement custom CSV loading.
-    """
-
-    data_path: str = Field("iris", description="Either the literal 'iris' or a future custom CSV path.")
+    data_path: str = Field("iris", description="'iris' or path/to/csv")
     test_size: float = 0.3
     random_state: int = 42
     n_splits: int = 10
     experiment_name: str = "iris-classification"
 
 class EvaluateRequest(BaseModel):
-    data_path: str = Field("iris", description="Dataset identifier—only 'iris' supported for now.")
+    data_path: str = Field("iris", description="'iris' or path/to/csv")
     mlflow_model_name: str
-    mlflow_model_stage: str = "Production"
+    mlflow_model_stage: str = Field("Production", description="Stage or version")
 
-# -----------------------------------------------------------------------------
-# Utility
-# -----------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────────────
+# Helper — load data
+# ──────────────────────────────────────────────────────────────────────────────
 
-def _validate_data_path(data_path: str):
-    """Only allow the built‑in Iris dataset until custom loader is implemented."""
-    if data_path != "iris":
-        raise HTTPException(
-            status_code=400,
-            detail="Custom CSV loading is not implemented; use data_path='iris'",
-        )
+def _load_data(path: str):
+    """Return (X, y) for built‑in Iris or CSV path."""
+    if path == "iris":
+        iris = load_iris()
+        return iris.data, iris.target
+    csv_path = _Path(path)
+    if not csv_path.exists():
+        raise HTTPException(status_code=400, detail=f"CSV not found: {path}")
+    return load_and_preprocess(str(csv_path))
 
-# -----------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────────────
 # Endpoints
-# -----------------------------------------------------------------------------
-
-@app.get("/health", summary="Health check")
-def health():
+# ──────────────────────────────────────────────────────────────────────────────
+@app.get("/health")
+async def health():
     return {"status": "ok"}
 
 
-@app.post("/train", summary="Launch model training in the background")
-def train_endpoint(params: TrainParams, background_tasks: BackgroundTasks):
-    _validate_data_path(params.data_path)
-
-    # Launch training asynchronously; we cannot capture MLflow run_id directly
+@app.post("/train")
+async def train(params: TrainParams, background_tasks: BackgroundTasks):
+    """Launch training in a background thread, returns expected model name."""
     background_tasks.add_task(
         py_train,
         data=params.data_path,
@@ -90,28 +92,13 @@ def train_endpoint(params: TrainParams, background_tasks: BackgroundTasks):
         n_splits=params.n_splits,
         experiment_name=params.experiment_name,
     )
-
-    return {
-        "message": "Training started – check MLflow UI for progress.",
-        "expected_model_name": f"{params.experiment_name}-rf-model",
-    }
+    model_name = f"{params.experiment_name}-rf-model"
+    return {"message": "training started", "model_name": model_name}
 
 
-@app.get(
-    "/train/status/{run_id}",
-    summary="Query MLflow for the status of a specific run_id",
-)
-def get_training_status(run_id: str = Path(..., description="MLflow run ID")):
-    try:
-        run = client.get_run(run_id)
-        return {"run_id": run_id, "status": run.info.status}
-    except Exception as err:
-        raise HTTPException(status_code=404, detail=str(err))
-
-
-@app.post("/evaluate", summary="Evaluate a registered model")
-def evaluate_endpoint(req: EvaluateRequest):
-    _validate_data_path(req.data_path)
+@app.post("/evaluate")
+async def evaluate_ep(req: EvaluateRequest):
+    """Evaluate a registered model on the given dataset (Iris or CSV)."""
     report = py_evaluate(
         data_path=req.data_path,
         mlflow_model_name=req.mlflow_model_name,
@@ -120,61 +107,49 @@ def evaluate_endpoint(req: EvaluateRequest):
     return report
 
 
-@app.post("/predict", summary="Predict using a registered model")
-def predict_endpoint(
-    input: IrisInput,
+@app.post("/predict")
+async def predict(
+    payload: IrisInput,
     model_name: str = "iris-classification-rf-model",
     model_stage: str = "Production",
 ):
-    X = [[
-        input.sepal_length,
-        input.sepal_width,
-        input.petal_length,
-        input.petal_width,
-    ]]
-    # Attempt to load the requested stage, fallback to latest version if needed
+    # Stage → attempt, fallback to latest version if stage missing
     try:
         model_uri = f"models:/{model_name}/{model_stage}"
         model = mlflow_sklearn.load_model(model_uri)
     except mlflow.exceptions.RestException:
         latest = client.get_latest_versions(model_name)[0]
-        model_uri = f"models:/{model_name}/{latest.version}"
-        model = mlflow_sklearn.load_model(model_uri)
-    except Exception as err:
-        raise HTTPException(status_code=404, detail=str(err))
+        model = mlflow_sklearn.load_model(f"models:/{model_name}/{latest.version}")
 
-    try:
-        preds = model.predict(X)
-    except Exception as err:
-        raise HTTPException(status_code=500, detail=str(err))
+    X = [[
+        payload.sepal_length,
+        payload.sepal_width,
+        payload.petal_length,
+        payload.petal_width,
+    ]]
+    pred = int(model.predict(X)[0])
+    return {"prediction": pred}
 
-    return {"prediction": int(preds[0])}
 
-
-@app.post("/register", summary="Register a run as a model and set stage")
-def register_endpoint(run_id: str, model_name: str, stage: str = "Staging"):
+# ── Model registry helpers
+# -----------------------------------------------------------------------------
+@app.post("/register")
+async def register_run(run_id: str, model_name: str, stage: str = "Staging"):
+    """Register a given run_id as a new model version and set stage."""
     try:
         mv = client.create_model_version(
-            name=model_name,
-            source=f"runs:/{run_id}/model",
-            run_id=run_id,
+            name=model_name, source=f"runs:/{run_id}/model", run_id=run_id
         )
         client.transition_model_version_stage(
-            name=model_name,
-            version=mv.version,
-            stage=stage,
+            name=model_name, version=mv.version, stage=stage
         )
         return {"model_name": model_name, "version": mv.version, "stage": stage}
     except Exception as err:
         raise HTTPException(status_code=400, detail=str(err))
 
 
-@app.post("/promote/{model_name}/{version}/{stage}", summary="Promote a model version")
-def promote_model(
-    model_name: str = Path(...),
-    version: int = Path(...),
-    stage: str = Path(...),
-):
+@app.post("/promote/{model_name}/{version}/{stage}")
+async def promote(model_name: str, version: int, stage: str):
     try:
         client.transition_model_version_stage(
             name=model_name, version=version, stage=stage
@@ -184,25 +159,17 @@ def promote_model(
         raise HTTPException(status_code=500, detail=str(err))
 
 
-@app.get("/models", summary="List registered models")
-def list_models():
-    models = client.search_registered_models()
-    return [
-        {
-            m.name: [
-                {"version": v.version, "stage": v.current_stage}
-                for v in m.latest_versions
-            ]
-        }
-        for m in models
-    ]
+@app.get("/models")
+async def list_registered():
+    regs = client.search_registered_models()
+    return {
+        m.name: [{"version": v.version, "stage": v.current_stage} for v in m.latest_versions]
+        for m in regs
+    }
 
 
-@app.delete("/models/{model_name}/{version}", summary="Delete a model version")
-def delete_model_version(
-    model_name: str = Path(...),
-    version: int = Path(...),
-):
+@app.delete("/models/{model_name}/{version}")
+async def delete_version(model_name: str, version: int):
     try:
         client.delete_model_version(name=model_name, version=version)
         return {"status": "deleted", "model_name": model_name, "version": version}
@@ -210,8 +177,8 @@ def delete_model_version(
         raise HTTPException(status_code=500, detail=str(err))
 
 
-@app.delete("/models/{model_name}", summary="Delete a registered model")
-def delete_registered_model(model_name: str = Path(...)):
+@app.delete("/models/{model_name}")
+async def delete_model(model_name: str):
     try:
         client.delete_registered_model(name=model_name)
         return {"status": "deleted", "model_name": model_name}

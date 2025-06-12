@@ -4,27 +4,30 @@ import pickle
 import fire
 
 # Set the project root directory based on the current file's location
-BASE_DIR = Path(__file__).resolve().parent.parent.parent
+BASE_DIR = Path(__file__).resolve().parent.parent.parent.parent
+
 
 def load_and_preprocess(data_path: str):
     """
-    Loads a CSV file, splits it into features and labels.
-    Args:
-        data_path (str): Path to the CSV file (absolute or relative).
-    Returns:
-        X (np.ndarray): Feature matrix.
-        y (np.ndarray): Label array.
+    載入 CSV 檔案，將其分割為特徵和標籤。
+    標籤會被轉換為整數編碼。
     """
     path = Path(data_path)
-    # Convert to absolute path if needed
+    # ... (處理相對路徑的邏輯)
     if not path.is_absolute():
+        # 確保 BASE_DIR 指向正確的專案根目錄
+        BASE_DIR = Path(__file__).resolve().parents[3] 
         path = BASE_DIR / path
-    # Read CSV file
+
     df = pd.read_csv(path)
-    # Separate features and label
     X = df.drop(columns=["species"])
-    y = df["species"]
-    return X.values, y.values
+    y_str = df["species"]
+
+    # 使用 factorize 將字串標籤轉換為整數 (e.g., "setosa" -> 0)
+    # sort=True 確保映射順序與 load_iris() 一致 (按字母順序)
+    y_int, _ = pd.factorize(y_str, sort=True)
+
+    return X.values, y_int
 
 def save_processed(
     data_path: str = "data/iris.csv",
