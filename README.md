@@ -40,19 +40,23 @@ You'll learn how to:
 ```text
 mlops-demo-iris-classifier/
 ├── mlops-demo-iris-classifier-py-venv/    # Python virtual environment (gitignored)
-├── data/                                  # Raw and processed data (e.g. iris.csv)
-├── mlflow-experiments/                    # MLflow project definitions for both languages
-│   ├── r_iris/
-│   └── python_iris/
-├── src/
-│   ├── common/                            # Shared configs/utilities
-│   ├── r/                                 # R pipelines and APIs
-│   └── python/                            # Python pipelines and APIs
+├── data/                                  # Raw and processed data
+│   └── iris.csv
+├── mlflow-experiments/                    # MLflow Project definitions
+│   ├── python_iris/
+│   └── r_iris/
+├── mlruns/                                # MLflow experiment runs
 ├── models/                                # (Legacy) model outputs (not used in MLflow-only workflow)
-├── docker/                                # Dockerfiles for deployment
-├── deploy/                                # CI/CD templates and scripts
+├── src/                                   # Source code
+│   ├── __pycache__/
+│   ├── outputs/                           # Evaluation and other outputs
+│   │   └── evaluate/
+│   ├── python/                            # Python pipelines and APIs
+│   └── r/                                 # R pipelines and APIs
 ├── .gitignore
-└── README.md
+├── mlflow.db                              # Local MLflow tracking database
+├── README.md
+└── requirements.txt                       # Python dependencies list
 ```
 
 ---
