@@ -170,11 +170,16 @@ Rscript src/r/modeling/evaluate.R \
 
 ## API Deployment
 
+### MLflow (python)
+
+```bash
+mlflow server --backend-store-uri sqlite:///mlflow.db --default-artifact-root mlruns --host 0.0.0.0 --port 5001
+```
+
 ### FastAPI (Python)
 
 ```bash
-uvicorn src/python/api/fastapi_main:app \
-  --host 0.0.0.0 --port 8000
+uvicorn src.python.api.fastapi_main:app --host 0.0.0.0 --port 8080 --reload
 ```
 
 ### Plumber (R)
