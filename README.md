@@ -222,3 +222,6 @@ This project is licensed under the [MIT License](LICENSE).
 **Key teaching note:**
 
 > In this repo, *all model management is handled by MLflow*—models are only ever loaded, versioned, and used via the MLflow tracking and model registry system. This ensures full experiment reproducibility, eliminates model version confusion, and prepares your pipeline for modern MLOps and production workflows.
+
+
+![alt text](image.png)
